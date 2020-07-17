@@ -188,6 +188,8 @@ private:
   TypeId          m_tid;          //!< Type of the socket used
 
   uint32_t        m_flowId;       //!< FT flow id
+  bool            m_usePoissonProcess; //!< Whether to use exp distr for next packet send time
+  Ptr<ExponentialRandomVariable> m_expRandomVariableNextSend; //!< Random variable to generate next packet send
 
   /// Traced Callback: transmitted packets.
   TracedCallback<Ptr<const Packet> > m_txTrace;

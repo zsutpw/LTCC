@@ -49,6 +49,7 @@
 #include "ns3/string.h"
 #include "ns3/pointer.h"
 #include "ns3/ft-tag.h"
+#include "ns3/boolean.h"
 
 namespace ns3 {
 
@@ -106,6 +107,11 @@ FtOnOffApplication::GetTypeId (void)
                    UintegerValue (0),
                    MakeUintegerAccessor (&FtOnOffApplication::m_flowId),
                    MakeUintegerChecker<uint32_t> ())
+    .AddAttribute ("UsePoissonProcess", "Whether to use exponential random variable to schedule "
+                   "next packet send event, if false - schedule uniformly (like in OnOffApplication)",
+                   BooleanValue (0),
+                   MakeBooleanAccessor (&FtOnOffApplication::m_usePoissonProcess),
+                   MakeBooleanChecker ())
   ;
   return tid;
 }
@@ -116,7 +122,8 @@ FtOnOffApplication::FtOnOffApplication ()
     m_connected (false),
     m_residualBits (0),
     m_lastStartTime (Seconds (0)),
-    m_totBytes (0)
+    m_totBytes (0),
+    m_expRandomVariableNextSend (CreateObject<ExponentialRandomVariable> ())
 {
   NS_LOG_FUNCTION (this);
 }
@@ -283,8 +290,14 @@ void FtOnOffApplication::ScheduleNextTx ()
     {
       uint32_t bits = m_pktSize * 8 - m_residualBits;
       NS_LOG_LOGIC ("bits = " << bits);
-      Time nextTime (Seconds (bits /
-                              static_cast<double>(m_cbrRate.GetBitRate ()))); // Time till next packet
+      double mean = bits / static_cast<double>(m_cbrRate.GetBitRate ());
+      NS_LOG_LOGIC ("mean = " << mean);
+      NS_LOG_LOGIC ("residual = " << m_residualBits);
+      if(m_usePoissonProcess)
+        {
+          mean = m_expRandomVariableNextSend->GetValue(mean, 0);
+        }
+      Time nextTime (Seconds (mean)); // Time till next packet
       NS_LOG_LOGIC ("currentDatarate = " << m_cbrRate.GetBitRate ());
       NS_LOG_LOGIC ("nextTime = " << nextTime);
       //if(!nextTime.IsZero()){

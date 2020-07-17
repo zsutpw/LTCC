@@ -41,21 +41,40 @@ std::string FLOW_UNIT = "bps";
 // start all apps at this time 
 double START_SIMULATION_TIME = 0.0;
 // stop apps sending, recv app works till END_SIMULATION_TIME
-double END_APPS_TIME = 20.0;
+double END_APPS_TIME = 25.0;
 // stop simulation
 double END_SIMULATION_TIME = 25.0;
-// packet size given in bytes
-int PACKET_SIZE = 1000;
+// packet size given in bytes; (user payload, headers are not included)
+int PACKET_SIZE = 1250;
 // every STATS_DELTA_TIME seconds stats are taken from simulator
-double STATS_DELTA_TIME = 0.01;
+double STATS_DELTA_TIME = 0.001;
 // scale all parameters with FLOW_UNIT: demand volumes, flow values, edge capacities..
-double SCALE = 10000.0;
+double SCALE = 100000.0;
 // multiply all edge bandwidth (initial and after events) by EDGE_BANDWIDTH_MARGIN
 double EDGE_BANDWIDTH_MARGIN = 1.03;
 // size of all point to point net devices queues [in packets]
 int QUEUE_SIZE = 1000;
 // transmission delay on link (point-to-point-channel) [in seconds]
 double LINK_DELAY = 0.002;
+// whether to use exp random var to generate next packet send time
+bool USE_POISSON_PROCESS = true;
+// seed for random generators inside NS3 simulator
+int SEED = 424244;
+////////////////////////
+
+
+// ppp header (2) + udp header (8) + ip header (20); 
+// used to increase(multiply) all bandwidths by (PACKET_SIZE+HEADER_SIZE)/PACKET_SIZE
+int HEADER_SIZE = 30;
+
+
+// increase(multiply) all bandwidths (initial and after events) by the returned value
+// in order to take into account HEADER_SIZE
+double
+BandwidthMultiplier()
+{
+	return (double)(PACKET_SIZE + HEADER_SIZE) / (double)PACKET_SIZE;
+}
 
 
 // read parameters from file
@@ -95,6 +114,10 @@ ReadParams(std::string filePath)
         QUEUE_SIZE = std::stoi(parameterValue);       
       }else if(parameterName.compare("LINK_DELAY") == 0){
         LINK_DELAY = std::stod(parameterValue);
+      }else if(parameterName.compare("USE_POISSON_PROCESS") == 0){
+		USE_POISSON_PROCESS = (std::stoi(parameterValue) == 1);
+      }else if(parameterName.compare("SEED") == 0){
+      	SEED = std::stoi(parameterValue); 
       }else{
         NS_LOG_INFO("--- bad parameter name!!");
         break;
@@ -140,7 +163,7 @@ ReadGraph(std::string filePath)
     for(int edgeId = 0; edgeId < E; ++edgeId){
       double bandwidth;
       fileStream >> bandwidth;
-      initial_edge_bandwidth[edgeId] = bandwidth * SCALE * EDGE_BANDWIDTH_MARGIN;
+      initial_edge_bandwidth[edgeId] = bandwidth * SCALE * EDGE_BANDWIDTH_MARGIN * BandwidthMultiplier();
     }
     fileStream.close();
   }else{
@@ -312,7 +335,7 @@ ReadEvents(std::string filePath)
       fileStream >> event_edge_time[edgeEventId];
       fileStream >> event_edge_id[edgeEventId];
       fileStream >> event_edge_bandwidth[edgeEventId];
-      event_edge_bandwidth[edgeEventId] *= SCALE * EDGE_BANDWIDTH_MARGIN;
+      event_edge_bandwidth[edgeEventId] *= SCALE * EDGE_BANDWIDTH_MARGIN * BandwidthMultiplier();
       //NS_LOG_INFO(event_edge_time[edgeEventId] << " " << event_edge_id[edgeEventId] << " " << event_edge_bandwidth[edgeEventId]);
     }
 
@@ -502,7 +525,8 @@ CreateApplications()
   // 1000 const should be larger total simulation time
   ftOnOffHelper.SetAttribute("OnTime", StringValue("ns3::ConstantRandomVariable[Constant=1000]"));
   ftOnOffHelper.SetAttribute("OffTime", StringValue("ns3::ConstantRandomVariable[Constant=0]"));
-
+  ftOnOffHelper.SetAttribute("UsePoissonProcess", BooleanValue(USE_POISSON_PROCESS));
+  
   //PacketSinkHelper packetSinkHelper(protocol, Address(InetSocketAddress(Ipv4Address("14.14.14.14"), port)));   
   PacketSinkHelper packetSinkHelper(protocol, Address(InetSocketAddress(Ipv4Address::GetAny(), temp_port))); 
 
@@ -554,13 +578,14 @@ ChangeBandwidth(const StringValue & dataRateValue, NetDeviceContainer & devices)
 {
   devices.Get(0)->SetAttribute("DataRate", dataRateValue);
   devices.Get(1)->SetAttribute("DataRate", dataRateValue);
-
-  //StringValue dr0;
-  //devices.Get(0)->GetAttribute("DataRate", dr0);
-  //NS_LOG_INFO("-------after datarate 0 " << dr0.Get());
-  //StringValue dr1;
-  //devices.Get(1)->GetAttribute("DataRate", dr1);
-  //NS_LOG_INFO("-------after datarate 1 " << dr1.Get());
+  /*
+  StringValue dr0;
+  devices.Get(0)->GetAttribute("DataRate", dr0);
+  NS_LOG_INFO("-------after datarate 0 " << dr0.Get());
+  StringValue dr1;
+  devices.Get(1)->GetAttribute("DataRate", dr1);
+  NS_LOG_INFO("-------after datarate 1 " << dr1.Get());
+  */
 }
 
 
@@ -583,8 +608,8 @@ ChangeTrafficRate(const StringValue & trafficRateValue, Ptr<Application> applica
   application->SetAttribute("DataRate", StringValue(trafficRateValue));
   StringValue dr0;
   onOffApp->GetAttribute("DataRate", dr0);
-  NS_LOG_INFO("-------after app datarate arg " << trafficRateValue.Get());
-  NS_LOG_INFO("-------after app datarate " << dr0.Get());
+  //NS_LOG_INFO("-------after app datarate arg " << trafficRateValue.Get());
+  //NS_LOG_INFO("-------after app datarate " << dr0.Get());
   onOffApp->ScheduleStartAppOnTime(NanoSeconds(20.0)); 
 }
 
@@ -725,27 +750,32 @@ GetQueueOutputFilePath(std::string & dataPath, int & edgeId, int & nodeId)
 }
 
 
-// adds single sample of current number of packets in edge queue (from both sides)
+// adds single sample of current number of packets and 
+// total number of dropped packets in edge queue (from both sides)
 void 
 SaveQueueNoPackets(int & edgeId)
 {  
   Ptr<PointToPointNetDevice> pp0 = DynamicCast<PointToPointNetDevice> (netDeviceContainers[edgeId].Get(0));
   uint32_t noPackets0 = pp0->GetQueue()->GetNPackets();
+  uint32_t noDroppedPackets0 = pp0->GetQueue()->GetTotalDroppedPackets();
   Ptr<PointToPointNetDevice> pp1 = DynamicCast<PointToPointNetDevice> (netDeviceContainers[edgeId].Get(1));
   uint32_t noPackets1 = pp1->GetQueue()->GetNPackets();
+  uint32_t noDroppedPackets1 = pp1->GetQueue()->GetTotalDroppedPackets();
 
   std::string sample0 = std::to_string(Simulator::Now().GetSeconds()) + " " + 
-                                       std::to_string(noPackets0) + "\n";
+                                       std::to_string(noPackets0) + " " +
+                                       std::to_string(noDroppedPackets0) + "\n";
   result_queue_samples[edgeId][0] += sample0;
 
   std::string sample1 = std::to_string(Simulator::Now().GetSeconds()) + " " + 
-                                       std::to_string(noPackets1) + "\n";
+                                       std::to_string(noPackets1) + " " + 
+                                       std::to_string(noDroppedPackets1) + "\n";
   result_queue_samples[edgeId][1] += sample1;
 
-  NS_LOG_INFO("-------queue no packets = " << sample0 << " " << sample1);
-  NS_LOG_INFO("-------queue max size   = " << pp0->GetQueue()->GetMaxSize() << " " << pp1->GetQueue()->GetMaxSize());
-  NS_LOG_INFO("-------queue cur size   = " << pp0->GetQueue()->GetCurrentSize() << " " << pp1->GetQueue()->GetCurrentSize());
-  NS_LOG_INFO("-------queue no dropped = " << pp0->GetQueue()->GetTotalDroppedPackets() << " " << pp0->GetQueue()->GetTotalDroppedPackets());
+  //NS_LOG_INFO("-------queue no packets = " << sample0 << " " << sample1);
+  //NS_LOG_INFO("-------queue max size   = " << pp0->GetQueue()->GetMaxSize() << " " << pp1->GetQueue()->GetMaxSize());
+  //NS_LOG_INFO("-------queue cur size   = " << pp0->GetQueue()->GetCurrentSize() << " " << pp1->GetQueue()->GetCurrentSize());
+  //NS_LOG_INFO("-------queue no dropped = " << pp0->GetQueue()->GetTotalDroppedPackets() << " " << pp1->GetQueue()->GetTotalDroppedPackets());
 }
 
 
@@ -793,6 +823,64 @@ SaveQueueResultStringsToFiles(std::string & dataPath)
   }
 }
 
+
+// save initialization, simulation and total time to file
+void
+SaveTimeLogsToFile(std::string & logPath, double ini_time, double sim_time, double tot_time)
+{
+	std::ofstream logFile(logPath + "log.txt");
+    logFile << "ini time = " + std::to_string(ini_time) + "s\n";
+  	logFile << "sim time = " + std::to_string(sim_time) + "s\n";
+  	logFile << "tot time = " + std::to_string(tot_time) + "s";
+  	logFile.close();
+}
+
+
+// compute and show total load on directed link id=edgeId 
+// from nodeId side
+void
+CheckEdgeLoad(int & edgeId, int & nodeId)
+{ 
+  uint64_t totalLoad = 0;
+  for(int demandId = 0; demandId < D; ++demandId){
+	for(int pathId = 0; pathId < demand_no_paths[demandId]; ++pathId){
+	  bool pathUsesEdge = false;
+	  for(int eId = 0; eId < demand_path_no_vertices[demandId][pathId]; ++eId){
+	  	if(demand_path_edge_ids[demandId][pathId][eId] == edgeId && 
+	  	   demand_path_output_interfaces[demandId][pathId][eId].first == nodeId){
+	  		pathUsesEdge = true;
+	  		break;
+	  	}
+	  }
+	  if(pathUsesEdge){
+    	Ptr<FtOnOffApplication> onOffApp = DynamicCast<FtOnOffApplication> (demandPathOnOffApps[demandId][pathId]);
+  		StringValue dataRateString;
+  		onOffApp->GetAttribute("DataRate", dataRateString);
+  		DataRate dataRate(dataRateString.Get());
+		// skip datarata = 1 as it 0 actually
+  		if(dataRate.GetBitRate() != 1){
+  			totalLoad += dataRate.GetBitRate();
+  		}
+	  }
+
+    }
+  }
+  NS_LOG_INFO("edge=" << std::to_string(edgeId) << " node=" << std::to_string(nodeId)
+  				 << " total load = " << totalLoad << " bps");
+  StringValue dr1;
+  netDeviceContainers[edgeId].Get(1)->GetAttribute("DataRate", dr1);
+  NS_LOG_INFO("edge=" << std::to_string(edgeId) << " bandwidth = " << dr1.Get());
+}
+
+
+// schedule checking total flow load on edgeId
+void 
+ScheduleCheckEdgeLoad(const Time & scheduleTime, int & edgeId, int & nodeId)
+{
+  Simulator::Schedule (scheduleTime, &CheckEdgeLoad, edgeId, nodeId);
+}
+
+
 // enable chosen logs to show in the console
 void 
 EnableLogComponents()
@@ -815,16 +903,20 @@ EnableLogComponents()
   //LogComponentEnable ("Ipv4L3Protocol", LOG_LEVEL_ALL);
   //LogComponentEnable ("FlowMonitor", LOG_LEVEL_ALL);
   //LogComponentEnable ("Queue", LOG_LEVEL_ALL);
+  //LogComponentEnable ("DataRate", LOG_LEVEL_FUNCTION);
+  //LogComponentEnable ("UdpSocketImpl", LOG_ALL);
 }
 
 
 void
-runSumulation()
+runSimulation(std::string path)
 {
   double start_time = get_time();
 
   std::string const HOME = std::getenv("HOME") ? std::getenv("HOME") : ".";
-  std::string dataPath = HOME + "/Desktop/simdata/example-report/";
+  //std::string dataPath = HOME + "/Desktop/simdata/rep/DL-quad-mid-simple/ftest1/";
+  std::string dataPath = HOME + path;
+  //std::string dataPath = HOME + "/Desktop/simdata/n2e1d1/";
 
   std::string paramsFilePath = dataPath + "params.txt";
   std::string graphFilePath = dataPath + "graph.txt";
@@ -846,6 +938,25 @@ runSumulation()
   SaveFlowStatistics(dataPath);
   SaveQueueStatistics(dataPath);
   
+  int edgeToCheck = 1;
+  int nodeToCheck1 = 0; 
+  int nodeToCheck2 = 2; 
+  
+  /*
+  ScheduleCheckEdgeLoad(Seconds(4.75), edgeToCheck, nodeToCheck1);
+  ScheduleCheckEdgeLoad(Seconds(4.75), edgeToCheck, nodeToCheck2);
+  ScheduleCheckEdgeLoad(Seconds(5.25), edgeToCheck, nodeToCheck1);
+  ScheduleCheckEdgeLoad(Seconds(5.25), edgeToCheck, nodeToCheck2);
+  ScheduleCheckEdgeLoad(Seconds(5.75), edgeToCheck, nodeToCheck1);
+  ScheduleCheckEdgeLoad(Seconds(5.75), edgeToCheck, nodeToCheck2);
+  ScheduleCheckEdgeLoad(Seconds(6.25), edgeToCheck, nodeToCheck1);
+  ScheduleCheckEdgeLoad(Seconds(6.25), edgeToCheck, nodeToCheck2);
+  ScheduleCheckEdgeLoad(Seconds(6.75), edgeToCheck, nodeToCheck1);
+  ScheduleCheckEdgeLoad(Seconds(6.75), edgeToCheck, nodeToCheck2);
+  ScheduleCheckEdgeLoad(Seconds(7.25), edgeToCheck, nodeToCheck1);
+  ScheduleCheckEdgeLoad(Seconds(7.25), edgeToCheck, nodeToCheck2);
+  */
+
   /*  
   // test: print nodes and output interafeces for all paths
   for(int demandId = 0; demandId < D; ++demandId){
@@ -870,10 +981,11 @@ runSumulation()
   NS_LOG_INFO("--- ini time = " + std::to_string(init_time) + "s");
   NS_LOG_INFO("--- sim time = " + std::to_string(total_time - init_time) + "s");
   NS_LOG_INFO("--- tot time = " + std::to_string(total_time) + "s");
-  
+
   Simulator::Destroy ();
   SaveFlowResultStringsToFiles(dataPath);
   SaveQueueResultStringsToFiles(dataPath);
+  SaveTimeLogsToFile(dataPath, init_time, total_time - init_time, total_time);
 }
 
 
@@ -881,11 +993,17 @@ int
 main (int argc, char *argv[])
 {
   CommandLine cmd;
+  //std::string dataPath = "/Desktop/simdata/n2e1d1/";
+  std::string dataPath = "/Desktop/simdata/rep_poisson/DL-quad-mid-simple-alpha05-beta1-fix/ftest4/";
+  cmd.AddValue("dataPath", "Path with input data", dataPath);
   cmd.Parse (argc, argv);
   Time::SetResolution (Time::NS);
 
+  RngSeedManager::SetSeed(SEED);
+
   EnableLogComponents();
-  runSumulation();
+
+  runSimulation(dataPath);
 
   return 0;
 }
